@@ -1,0 +1,27 @@
+# Python / Virtual Environment
+venv/
+ENV/
+env/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller / Build outputs
+build/
+dist/
+*.spec
+
+# Test files & sample output artifacts
+sample_test.pptx
+*.log
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
