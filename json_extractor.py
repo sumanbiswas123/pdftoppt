@@ -66,9 +66,16 @@ class AIDesignPackageExtractor:
         else:
             print(message)
 
-    def extract(self, pdf_path, output_dir=None, select_pages_str="", ignore_pages_str=""):
+    def extract(self, pdf_path, output_dir=None, select_pages_str="", ignore_pages_str="", email_width=700):
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+
+        try:
+            email_width = int(email_width)
+        except (ValueError, TypeError):
+            email_width = 700
+
+        content_width = email_width - 40
 
         base_name = os.path.splitext(os.path.basename(pdf_path))[0]
         if not output_dir:
@@ -106,15 +113,15 @@ class AIDesignPackageExtractor:
         if not final_pages:
             raise ValueError(f"No pages left to convert after applying filters. Selected: {selected_set}, Ignored: {ignored_set}.")
 
-        self.log(f"Extracting AI Design Package for {len(final_pages)} page(s): {[p+1 for p in final_pages]}...")
+        self.log(f"Extracting AI Design Package ({email_width}px container) for {len(final_pages)} page(s): {[p+1 for p in final_pages]}...")
 
         package_data = {
             "document_name": os.path.basename(pdf_path),
             "total_pages": len(final_pages),
             "target_email_specs": {
-                "container_width": "700px",
+                "container_width": f"{email_width}px",
                 "padding_left_right": "20px",
-                "content_width": "660px",
+                "content_width": f"{content_width}px",
                 "framework": "MJML"
             },
             "pages": []
@@ -125,16 +132,15 @@ class AIDesignPackageExtractor:
         for page_idx in final_pages:
             page = doc[page_idx]
             rect = page.rect
-            scale = 660.0 / rect.width if rect.width > 0 else 1.0
+            scale = float(content_width) / rect.width if rect.width > 0 else 1.0
             pdf_links = page.get_links()
 
-            # 1. Render Full High-Resolution Page Preview (Minimum 700px width guaranteed)
+            # 1. Render Full High-Resolution Page Preview (Minimum email_width px guaranteed)
             page_preview_filename = f"page_{page_idx+1}_preview.png"
             page_preview_path = os.path.join(package_dir, page_preview_filename)
             
-            # Guarantee minimum 700px pixel width for screenshot
-            min_width_px = max(700.0, rect.width)
-            zoom_w = max(1.0, 700.0 / rect.width if rect.width > 0 else 1.0)
+            min_width_px = max(float(email_width), rect.width)
+            zoom_w = max(1.0, float(email_width) / rect.width if rect.width > 0 else 1.0)
             render_matrix = fitz.Matrix(zoom_w * 1.5, zoom_w * 1.5)
             page_pix = page.get_pixmap(matrix=render_matrix, alpha=False)
             page_pix.save(page_preview_path)
@@ -324,40 +330,12 @@ class AIDesignPackageExtractor:
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(package_data, f, indent=2)
 
-        # Generate Ready-to-Paste Gemini Prompt
-        prompt_filename = "PROMPT_FOR_GEMINI.txt"
-        prompt_path = os.path.join(package_dir, prompt_filename)
-        prompt_content = f"""You are an expert Email Template & MJML Developer.
-I have uploaded the design screenshot '{page_preview_filename}' and the structured '{json_filename}'.
-
-TASK:
-Convert this email design into clean, pixel-perfect, mobile-responsive MJML code.
-
-CRITICAL REQUIREMENTS:
-1. Container Specs:
-   - Outer width: 700px (<mj-body width="700px" background-color="#eef1f4">)
-   - Left & Right Padding: 20px (Inner content area = 660px)
-2. Assets:
-   - Use the exact asset paths listed in the JSON (e.g. 'assets/asset_p1_1.png', 'assets/asset_p1_2.png', etc.).
-3. Styling & Hierarchy:
-   - Match all font sizes, bold weights, line heights, and exact hex colors from the JSON.
-   - For citations & numbers, keep superscripts inline: <sup>2,3</sup>, <sup>4</sup>.
-   - For colored cards (e.g. red #{package_data['pages'][0]['background_cards'][0]['fill_color'] if package_data['pages'][0]['background_cards'] else '9e0b0f'} or grey cards), use <mj-section background-color="..."> with matching border-radius.
-   - For side-by-side elements (e.g. header logo + text, or photo + card), use <mj-section> with 2 <mj-column> tags.
-   - For rating grids (e.g. 5 satisfaction smilies), use <mj-group> with 5 <mj-column width="20%"> tags.
-   - For CTA buttons, use <mj-button> with proper background-color and link.
-4. Output ONLY the raw <mjml>...</mjml> code without markdown formatting so it is ready to compile directly into production table HTML.
-"""
-        with open(prompt_path, "w", encoding="utf-8") as f:
-            f.write(prompt_content)
-
         self.log(f"AI Design Package ready in: {os.path.basename(package_dir)}/")
         self.log(f"  - Structured Data: {json_filename}")
         self.log(f"  - Visual Screenshot: {page_preview_filename}")
         self.log(f"  - Assets Folder: assets/ ({img_counter} images)")
-        self.log(f"  - AI Prompt: {prompt_filename}")
 
-        return package_dir, json_path, prompt_path
+        return package_dir, json_path
 
 # Standalone MJML to HTML helper
 def compile_mjml_to_html(mjml_code, output_html_path):

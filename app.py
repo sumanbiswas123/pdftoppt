@@ -15,7 +15,7 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("ePDF to ePPT & HTML Email Template Converter")
-        self.geometry("740x730")
+        self.geometry("740x780")
         self.resizable(False, False)
 
         self.pdf_file_path = ""
@@ -119,7 +119,33 @@ class App(ctk.CTk):
         self.custom_height_entry.grid(row=3, column=1, padx=10, pady=(6, 10), sticky="w")
 
         self.custom_height_hint = ctk.CTkLabel(self.options_card, text="px (beside auto)", text_color="gray", font=ctk.CTkFont(size=11))
-        self.custom_height_hint.grid(row=3, column=2, padx=5, pady=(6, 10), sticky="w")
+        self.custom_height_hint.grid(row=3, column=2, padx=5, pady=(6, 6), sticky="w")
+
+        # 4. Email Width Switch / Selector (700px, 650px, 600px)
+        self.email_width_label = ctk.CTkLabel(
+            self.options_card, 
+            text="Email Width", 
+            font=ctk.CTkFont(weight="bold")
+        )
+        self.email_width_label.grid(row=4, column=0, padx=15, pady=(6, 12), sticky="w")
+
+        self.email_width_var = tk.StringVar(value="700px")
+        self.email_width_seg = ctk.CTkSegmentedButton(
+            self.options_card,
+            values=["700px", "650px", "600px"],
+            variable=self.email_width_var,
+            width=220,
+            command=self.update_email_width_hint
+        )
+        self.email_width_seg.grid(row=4, column=1, padx=10, pady=(6, 12), sticky="w")
+
+        self.email_width_hint = ctk.CTkLabel(
+            self.options_card, 
+            text="(Inner Content: 660px)", 
+            text_color="gray", 
+            font=ctk.CTkFont(size=11)
+        )
+        self.email_width_hint.grid(row=4, column=2, padx=5, pady=(6, 12), sticky="w")
 
         # Log Text Box
         self.log_box = ctk.CTkTextbox(self, height=120, width=670, font=ctk.CTkFont(family="Consolas", size=11))
@@ -154,10 +180,10 @@ class App(ctk.CTk):
         )
         self.convert_html_btn.grid(row=0, column=1, padx=6, pady=4)
 
-        # Row 1 - Option C: Export AI Package (JSON + Assets + Gemini Prompt)
+        # Row 1 - Option C: Export AI Package (JSON + Assets)
         self.export_ai_btn = ctk.CTkButton(
             self.btn_frame, 
-            text="Export AI Package (JSON + Assets + Prompt)", 
+            text="Export AI Package (JSON + Assets)", 
             font=ctk.CTkFont(size=13, weight="bold"),
             fg_color="#205493",
             hover_color="#153d6b",
@@ -197,6 +223,14 @@ class App(ctk.CTk):
             self.custom_height_entry.configure(state="normal")
         else:
             self.custom_height_entry.configure(state="disabled")
+
+    def update_email_width_hint(self, value):
+        try:
+            width_num = int(value.replace("px", ""))
+            inner_num = width_num - 40
+            self.email_width_hint.configure(text=f"(Inner Content: {inner_num}px)")
+        except Exception:
+            pass
 
     def browse_pdf(self):
         filename = filedialog.askopenfilename(
@@ -292,15 +326,19 @@ class App(ctk.CTk):
 
             all_results = list(saved_ppt_files)
 
-            # Step 2: Convert PPTX to GSK-Style HTML Email Template (if selected)
+            # Step 2: Convert PPTX to Responsive HTML Email Template (if selected)
             if generate_html and saved_ppt_files:
-                self.append_log("\n--- Generating GSK-Compliant HTML Email Template ---")
+                try:
+                    width_val = int(self.email_width_var.get().replace("px", ""))
+                except Exception:
+                    width_val = 700
+                self.append_log(f"\n--- Generating Responsive HTML Email Template ({width_val}px) ---")
                 html_converter = PPTToHTMLEmailConverter(progress_callback=self.append_log)
                 
                 for ppt_file in saved_ppt_files:
                     base_no_ext, _ = os.path.splitext(ppt_file)
                     html_file = f"{base_no_ext}_email.html"
-                    saved_html, _ = html_converter.convert(ppt_file, html_file)
+                    saved_html, _ = html_converter.convert(ppt_file, html_file, email_width=width_val)
                     all_results.append(saved_html)
 
             files_formatted = "\n".join(all_results)
@@ -326,18 +364,24 @@ class App(ctk.CTk):
 
         select_str = self.select_pages_entry.get().strip() if self.select_pages_var.get() else ""
         ignore_str = self.ignore_pages_entry.get().strip() if self.ignore_pages_var.get() else ""
+        
+        try:
+            width_val = int(self.email_width_var.get().replace("px", ""))
+        except Exception:
+            width_val = 700
 
-        self.append_log("\n--- Exporting AI Design Package (JSON + Assets + Gemini Prompt) ---")
+        self.append_log(f"\n--- Exporting AI Design Package ({width_val}px container) ---")
         try:
             extractor = AIDesignPackageExtractor(progress_callback=self.append_log)
-            pkg_dir, json_file, prompt_file = extractor.extract(
+            pkg_dir, json_file = extractor.extract(
                 pdf_path, 
                 out_dir, 
                 select_pages_str=select_str, 
-                ignore_pages_str=ignore_str
+                ignore_pages_str=ignore_str,
+                email_width=width_val
             )
             self.append_log(f"\nAI Design Package exported to:\n{pkg_dir}")
-            messagebox.showinfo("AI Package Exported", f"AI Package successfully created!\n\nLocation:\n{pkg_dir}\n\nIncludes:\n- Design JSON\n- Visual Screenshot (>=700px width)\n- Assets Folder\n- Gemini Ready Prompt")
+            messagebox.showinfo("AI Package Exported", f"AI Package successfully created!\n\nLocation:\n{pkg_dir}\n\nWidth: {width_val}px (Inner: {width_val - 40}px)\n\nIncludes:\n- Design JSON\n- Visual Screenshot (>= {width_val}px)\n- Assets Folder")
         except Exception as e:
             self.append_log(f"\nError exporting AI package: {str(e)}")
             messagebox.showerror("Export Error", f"An error occurred:\n{str(e)}")
@@ -347,6 +391,13 @@ class App(ctk.CTk):
         dialog.title("Paste & Compile MJML to HTML Email")
         dialog.geometry("640x540")
         dialog.resizable(True, True)
+
+        # Ensure dialog always opens in front of the main window and grabs focus
+        dialog.transient(self)
+        dialog.lift()
+        dialog.focus_force()
+        dialog.attributes("-topmost", True)
+        dialog.after(200, lambda: dialog.attributes("-topmost", False))
 
         lbl = ctk.CTkLabel(dialog, text="Paste the MJML generated by Gemini / AI below:", font=ctk.CTkFont(size=13, weight="bold"))
         lbl.pack(padx=20, pady=(15, 5), anchor="w")

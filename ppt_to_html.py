@@ -60,7 +60,7 @@ class SpatialMJMLEmailConverter:
         else:
             print(message)
 
-    def convert(self, pdf_or_pptx_path, html_path=None, assets_dir_name=None):
+    def convert(self, pdf_or_pptx_path, html_path=None, assets_dir_name=None, email_width=700):
         pdf_path = pdf_or_pptx_path
         if pdf_or_pptx_path.lower().endswith(".pptx"):
             possible_pdf = pdf_or_pptx_path.replace("_editable.pptx", ".pdf").replace(".pptx", ".pdf")
@@ -69,6 +69,13 @@ class SpatialMJMLEmailConverter:
 
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"Source file not found: {pdf_path}")
+
+        try:
+            email_width = int(email_width)
+        except (ValueError, TypeError):
+            email_width = 700
+
+        content_width = email_width - 40
 
         if not html_path:
             base_no_ext, _ = os.path.splitext(pdf_or_pptx_path)
@@ -83,7 +90,7 @@ class SpatialMJMLEmailConverter:
         full_assets_dir = os.path.join(output_dir, assets_dir_name)
         os.makedirs(full_assets_dir, exist_ok=True)
 
-        self.log(f"Compiling Spatial-MJML Email from: {os.path.basename(pdf_path)}...")
+        self.log(f"Compiling Spatial-MJML Email ({email_width}px container) from: {os.path.basename(pdf_path)}...")
         doc = fitz.open(pdf_path)
         
         all_mjml_sections = []
@@ -91,7 +98,7 @@ class SpatialMJMLEmailConverter:
 
         for page_idx, page in enumerate(doc):
             rect = page.rect
-            scale = 660.0 / rect.width if rect.width > 0 else 1.0
+            scale = float(content_width) / rect.width if rect.width > 0 else 1.0
             pdf_links = page.get_links()
 
             # -----------------------------------------------------------------
@@ -465,7 +472,7 @@ class SpatialMJMLEmailConverter:
       img {{ -ms-interpolation-mode: bicubic; }}
     </mj-style>
   </mj-head>
-  <mj-body width="700px" background-color="#eef1f4">
+  <mj-body width="{email_width}px" background-color="#eef1f4">
     {"".join(all_mjml_sections)}
   </mj-body>
 </mjml>
