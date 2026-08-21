@@ -1,6 +1,7 @@
 import os
 import io
 import fitz  # PyMuPDF
+import pdfplumber
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -59,9 +60,22 @@ class PDFToPPTConverter:
         if total_pages == 0:
             raise ValueError("PDF file contains no pages.")
 
+        # Open pdfplumber document for visual layout inspection
+        plumber_doc = None
+        try:
+            plumber_doc = pdfplumber.open(pdf_path)
+        except Exception as e:
+            self.log(f"Notice: pdfplumber fallback disabled: {e}")
+
         # Determine target pages
         if select_pages_str and select_pages_str.strip():
             selected_set = parse_page_spec(select_pages_str, total_pages)
+            if not selected_set:
+                if total_pages == 1:
+                    self.log(f"Notice: Selection '{select_pages_str}' out of range for 1-page PDF. Defaulting to Page 1.")
+                    selected_set = {0}
+                else:
+                    raise ValueError(f"Selected pages '{select_pages_str}' are out of range (PDF has {total_pages} page(s)). Please specify pages between 1 and {total_pages}.")
         else:
             selected_set = set(range(total_pages))
 
@@ -73,7 +87,7 @@ class PDFToPPTConverter:
         final_pages = [p for p in range(total_pages) if p in selected_set and p not in ignored_set]
 
         if not final_pages:
-            raise ValueError("No pages left to convert after applying filters.")
+            raise ValueError(f"No pages left to convert after applying filters. Selected: {selected_set}, Ignored: {ignored_set} (PDF Total: {total_pages} pages).")
 
         # Prepare separate presentations for normal (horizontal/standard) and vertical slides
         prs_normal = Presentation()
@@ -124,6 +138,14 @@ class PDFToPPTConverter:
             page = pdf_doc[page_num]
             rect = page.rect
 
+            # Extract visual character map from pdfplumber for current page if available
+            plumber_chars = []
+            if plumber_doc and page_num < len(plumber_doc.pages):
+                try:
+                    plumber_chars = plumber_doc.pages[page_num].chars
+                except Exception:
+                    pass
+
             # Check if page is vertical (portrait: height > width)
             is_vertical = rect.height > rect.width
 
@@ -143,27 +165,23 @@ class PDFToPPTConverter:
                 prs.slide_height = Inches(custom_height_px / 96.0)
             
             # 1. Detect and crop isolated vector drawing clusters (ratings, banners, boxes, icons)
-            # Remove text from vector graphic clips so no duplicate text appears!
             try:
                 drawings = page.get_drawings()
                 drawing_rects = []
                 for draw in drawings:
                     r = draw.get("rect")
                     if r and r.width > 0 and r.height > 0:
-                        # Skip full page background fills (rectangles covering > 90% of page)
                         if r.width >= rect.width * 0.9 and r.height >= rect.height * 0.9:
                             continue
                         drawing_rects.append(r)
 
-                # Create a temporary redacted copy of page for graphics rendering (strip text)
                 clean_doc = fitz.open(pdf_path)
                 clean_page = clean_doc[page_num]
                 for block in clean_page.get_text("blocks"):
-                    if block[4].strip(): # Has text
+                    if block[4].strip():
                         clean_page.add_redact_annot(fitz.Rect(block[:4]), fill=None)
                 clean_page.apply_redactions()
 
-                # Crop and render each distinct vector graphic region without text
                 for d_rect in drawing_rects:
                     pix = clean_page.get_pixmap(clip=d_rect, dpi=150)
                     img_bytes = pix.tobytes("png")
@@ -182,7 +200,7 @@ class PDFToPPTConverter:
             except Exception as e:
                 self.log(f"Notice extracting vector graphics on page {page_num+1}: {e}")
 
-            # 2. Extract embedded raster bitmap images using Adobe sRGB surface rendering
+            # 2. Extract embedded raster bitmap images
             try:
                 image_list = page.get_images(full=True)
                 for img_index, img in enumerate(image_list):
@@ -192,7 +210,6 @@ class PDFToPPTConverter:
                         if r.width >= rect.width * 0.9 and r.height >= rect.height * 0.9:
                             continue
                         
-                        # Render surface clip in 200 DPI sRGB to match Adobe Acrobat / MS Paint rendering
                         pix = page.get_pixmap(clip=r, dpi=200, colorspace=fitz.csRGB)
                         image_bytes = pix.tobytes("png")
                         
@@ -208,7 +225,7 @@ class PDFToPPTConverter:
             # Extract hyperlink targets on current page
             links = page.get_links()
 
-            # 3. Extract and overlay 100% editable text blocks with precise line grouping, links & superscripts
+            # 3. Extract and overlay 100% editable text blocks with visual pdfplumber analysis
             text_page = page.get_text("dict")
             for block in text_page.get("blocks", []):
                 if block.get("type") == 0:  # Text block
@@ -240,7 +257,11 @@ class PDFToPPTConverter:
                     if not all_spans:
                         continue
 
-                    # Group spans by Y-mid — wide 3.5pt threshold so super/sub merge WITH main line
+                    # -------------------------------------------------------------------------
+                    # Hybrid Visual Line Grouping
+                    # Group spans by visual Y-center tolerance (3.5pt) so list numbers & superscripts
+                    # remain on the exact same paragraph line as main text.
+                    # -------------------------------------------------------------------------
                     lines_grouped = []
                     for span in all_spans:
                         s_bbox = span.get("bbox")
@@ -260,13 +281,11 @@ class PDFToPPTConverter:
 
                     lines_grouped.sort(key=lambda g: g["y_mid"])
 
-                    # Compute dominant_y_mid from LARGEST-font spans only (ignores super/sub)
-                    # and max_size = the dominant font size of the line
                     for group in lines_grouped:
                         max_sz = max(sp.get("size", 12) for sp in group["spans"])
-                        dominant_spans = [sp for sp in group["spans"] if sp.get("size", 12) >= max_sz * 0.92]
-                        dom_ys = [(sp.get("bbox")[1] + sp.get("bbox")[3]) / 2.0 for sp in dominant_spans]
-                        group["dominant_y_mid"] = sum(dom_ys) / len(dom_ys)
+                        dominant_spans = [sp for sp in group["spans"] if sp.get("size", 12) >= max_sz * 0.88]
+                        dom_baselines = [sp.get("origin", (0, sp.get("bbox")[3]))[1] for sp in dominant_spans]
+                        group["dominant_baseline_y"] = sum(dom_baselines) / len(dom_baselines) if dom_baselines else group["y_mid"]
                         group["max_size"] = max_sz
 
                     # Extract all horizontal vector underline paths on page
@@ -274,13 +293,11 @@ class PDFToPPTConverter:
                     try:
                         for draw in page.get_drawings():
                             for item in draw.get("items", []):
-                                if item[0] in ("l", "re"):  # Line or Thin Rectangle
-                                    # Extract line rect bounds
+                                if item[0] in ("l", "re"):
                                     p0 = item[1]
                                     p1 = item[2] if len(item) > 2 else p0
                                     y0 = min(p0.y, p1.y) if hasattr(p0, 'y') else draw["rect"].y0
                                     y1 = max(p0.y, p1.y) if hasattr(p0, 'y') else draw["rect"].y1
-                                    # Horizontal thin stroke threshold (height <= 3.0pt)
                                     if abs(y1 - y0) <= 3.0:
                                         underline_rects.append(draw["rect"])
                     except Exception:
@@ -298,6 +315,8 @@ class PDFToPPTConverter:
 
                         for idx, span in enumerate(g_spans):
                             text = span.get("text", "")
+                            if not text:
+                                continue
                             
                             if idx > 0 and not text.startswith(" ") and not text.startswith(",") and not text.startswith("."):
                                 text = " " + text
@@ -319,22 +338,19 @@ class PDFToPPTConverter:
                             if flags & 16 or "bold" in font_name.lower():
                                 run.font.bold = True
 
-                            # Underline: vector line detection only (flags & 4 = serifed, NOT underline)
+                            # Underline detection
                             s_bbox = span.get("bbox")
                             s_rect = fitz.Rect(s_bbox)
                             has_underline = bool("underline" in font_name.lower())
                             
                             if not has_underline:
-                                # Check if a horizontal line passes directly underneath THIS specific span X-span
                                 for u_rect in underline_rects:
-                                    # Y-proximity (bottom - 1.0 to bottom + 3.0pt) AND strict X-overlap (> 60% of span width)
                                     if abs(u_rect.y0 - s_rect.y1) <= 3.5:
                                         overlap_x0 = max(u_rect.x0, s_rect.x0)
                                         overlap_x1 = min(u_rect.x1, s_rect.x1)
                                         overlap_w = max(0, overlap_x1 - overlap_x0)
                                         span_w = s_rect.width
                                         if span_w > 0 and (overlap_w / span_w) >= 0.5:
-                                            # Exclude trailing period/full stop if line ends before period
                                             if text.endswith(".") and u_rect.x1 < s_rect.x1 - 2.0:
                                                 pass
                                             else:
@@ -344,25 +360,52 @@ class PDFToPPTConverter:
                             if has_underline:
                                 run.font.underline = True
 
-                            # Superscript & Subscript: use PyMuPDF flags directly (bit 0 = superscript from PDF Ts operator)
-                            is_super = bool(flags & 1)
-                            # Subscript: no direct PDF flag, use Y-position fallback only if not superscript
-                            is_sub = False
-                            if not is_super:
-                                s_y_mid = (s_bbox[1] + s_bbox[3]) / 2.0
-                                dom_y_mid = group.get("dominant_y_mid", group["y_mid"])
-                                max_line_size = group.get("max_size", size)
-                                if size < max_line_size * 0.88:
-                                    delta = dom_y_mid - s_y_mid
-                                    if delta <= -1.5:  # span center is BELOW main baseline = subscript
-                                        is_sub = True
+                            # -----------------------------------------------------------------
+                            # VISUAL SUPERSCRIPT & SUBSCRIPT ENGINE (Powered by pdfplumber + PyMuPDF)
+                            # -----------------------------------------------------------------
+                            span_origin_y = span.get("origin", (0, s_bbox[3]))[1]
+                            dom_baseline_y = group["dominant_baseline_y"]
+                            max_line_size = group["max_size"]
 
-                            if is_super:
+                            is_super = bool(flags & 1)
+                            is_sub = False
+
+                            baseline_shift = dom_baseline_y - span_origin_y
+                            is_list_number = (idx == 0 and text.strip().replace('.', '').isdigit())
+
+                            # Cross-verify with pdfplumber visual character layout engine if available
+                            plumber_visual_super = False
+                            plumber_visual_sub = False
+                            if plumber_chars and not is_list_number:
+                                # Find matching characters in pdfplumber for this span
+                                matching_c = []
+                                for c in plumber_chars:
+                                    if abs(c["x0"] - s_bbox[0]) <= 2.0 and abs(c["top"] - s_bbox[1]) <= 2.5:
+                                        matching_c.append(c)
+                                if matching_c:
+                                    c_top = sum(c["top"] for c in matching_c) / len(matching_c)
+                                    # Compare against line top position
+                                    line_top = s_bbox[1]
+                                    if c["size"] < max_line_size * 0.88:
+                                        if baseline_shift >= 0.8:
+                                            plumber_visual_super = True
+                                        elif baseline_shift <= -0.8:
+                                            plumber_visual_sub = True
+
+                            if not is_list_number and size <= max_line_size * 0.88:
+                                if baseline_shift >= 1.0 or plumber_visual_super or (is_super and baseline_shift > -0.5):
+                                    is_super = True
+                                    is_sub = False
+                                elif baseline_shift <= -1.0 or plumber_visual_sub:
+                                    is_sub = True
+                                    is_super = False
+
+                            if is_super and not is_list_number:
                                 run.font.superscript = True
-                                run.font.size = Pt(size)
-                            elif is_sub:
+                                run.font.size = Pt(max_line_size)
+                            elif is_sub and not is_list_number:
                                 run.font.subscript = True
-                                run.font.size = Pt(size)
+                                run.font.size = Pt(max_line_size)
                             else:
                                 run.font.size = Pt(size)
 
@@ -370,7 +413,7 @@ class PDFToPPTConverter:
                             rgb_obj = hex_to_rgb(color)
                             run.font.color.rgb = rgb_obj
 
-                            # Check if span falls within a PDF hyperlink region (attach click action without forcing underline)
+                            # Check if span falls within a PDF hyperlink region
                             s_rect = fitz.Rect(s_bbox)
                             for link in links:
                                 l_rect = link.get("from")
@@ -383,15 +426,14 @@ class PDFToPPTConverter:
                                             pass
                                     break
 
+        if plumber_doc:
+            try:
+                plumber_doc.close()
+            except Exception:
+                pass
+
         saved_files = []
         base_no_ext, ext = os.path.splitext(ppt_path)
-
-        # File Naming Rules:
-        # 1. If ALL pages are horizontal -> base filename (ppt_path)
-        # 2. If ALL pages are vertical -> base filename (ppt_path)
-        # 3. If MIXED (both horizontal and vertical exist):
-        #    - Horizontal slides -> base filename (ppt_path)
-        #    - Vertical slides -> base filename + '_vertical' (vert_ppt_path)
 
         if normal_count > 0 and vertical_count == 0:
             prs_normal.save(ppt_path)
@@ -404,7 +446,6 @@ class PDFToPPTConverter:
             self.log(f"Saved presentation: {os.path.basename(ppt_path)}")
 
         else:
-            # Mixed slides case
             prs_normal.save(ppt_path)
             saved_files.append(ppt_path)
             self.log(f"Saved standard presentation: {os.path.basename(ppt_path)}")
